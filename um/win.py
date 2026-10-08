@@ -23,20 +23,25 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
 
-from um.common import die, is_windows, is_wsl, ps_exe, to_posix, to_win
+from um.common import die, is_windows, is_wsl, ps_exe, ps_quote, safe_relpath, to_posix, to_win
 
 HERE = Path(__file__).resolve().parent
 TOOLS = HERE / "ps1"          # shipped inside the package so `uv tool install` gets them too
 FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 FFMPEG_SUMS = FFMPEG_URL.rsplit("/", 1)[0] + "/checksums.sha256"
+# How `start` left a game running on its own. Windows-only names, absent on the Linux side of WSL (which
+# launches the exe through interop instead), so they are looked up rather than referenced.
+DETACHED = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
 
 def _check_platform():
@@ -125,6 +130,24 @@ def download_ffmpeg(z: Path):
     print("sha256 ok", want)
 
 
+def _extract_zip(z: Path, dest: Path) -> str:
+    """Extract z into dest once every member is known to stay inside it, and return its one top-level folder.
+    download_ffmpeg's SHA-256 is the first line of defence; by default that sum comes from the same release
+    as the zip, so this check is what holds if a build is ever swapped for one naming ../x or a drive root."""
+    with zipfile.ZipFile(z) as zf:
+        roots = set()
+        for info in zf.infolist():
+            rel = safe_relpath(info.filename, allow_backslash=True)
+            if rel is None:
+                die(f"{z.name} names a path that would escape {dest}: {info.filename!r} - not extracting it")
+            if rel.parts:
+                roots.add(rel.parts[0])
+        if len(roots) != 1:
+            die(f"expected one top-level folder in {z.name}, found {sorted(roots) or 'nothing'}")
+        zf.extractall(dest)
+    return roots.pop()
+
+
 def setup(args=None):
     _check_platform()
     d = local_appdata()
@@ -133,9 +156,7 @@ def setup(args=None):
     if not ffmpeg_win(required=False) or (args and args.force):
         z = d / "ffmpeg.zip"
         download_ffmpeg(z)
-        with zipfile.ZipFile(z) as zf:
-            root = zf.namelist()[0].split("/")[0]
-            zf.extractall(d)
+        root = _extract_zip(z, d)
         if (d / "ffmpeg").exists():
             shutil.rmtree(d / "ffmpeg")
         (d / root).rename(d / "ffmpeg")
@@ -169,7 +190,9 @@ def encoder() -> str:
 
 
 def processes(name: str | None = None) -> list[dict]:
-    flt = f"-Name '{name}*'" if name else ""
+    # ps_quote, never an f-string hole: a window name is often something um scan or a field note found, and
+    # one holding a quote would close the literal and run as PowerShell (`um win ps "x'; <command>; '"`).
+    flt = f"-Name {ps_quote(name + '*')}" if name else ""
     out = powershell(f"Get-Process {flt} -ErrorAction SilentlyContinue | Where-Object {{ $_.MainWindowHandle -ne 0 }} | "
                      "Select-Object Id,ProcessName,MainWindowTitle,@{n='Hwnd';e={[int64]$_.MainWindowHandle}} | ConvertTo-Json -Compress")
     if not out.strip():
@@ -180,7 +203,7 @@ def processes(name: str | None = None) -> list[dict]:
 
 def pid_of(name: str) -> int | None:
     n = name[:-4] if name.lower().endswith(".exe") else name
-    out = powershell(f"(Get-Process -Name '{n}' -ErrorAction SilentlyContinue | Select-Object -First 1).Id").strip()
+    out = powershell(f"(Get-Process -Name {ps_quote(n)} -ErrorAction SilentlyContinue | Select-Object -First 1).Id").strip()
     return int(out) if out.isdigit() else None
 
 
@@ -191,12 +214,31 @@ def kill(pid: int):
 
 
 def launch(target: str, args: list[str], steam: bool = False):
+    """Start a game, without `cmd /c start`: cmd re-parses the command line it is given, so a target or an
+    argument holding & | or ^ ran as a second command (`um win launch --steam "480&calc"` started calc)."""
     if steam:
-        url = f"steam://rungameid/{target}" if not args else f"steam://run/{target}//{' '.join(args)}/"
-        subprocess.run(["cmd.exe" if is_wsl() else "cmd", "/c", "start", "", url], cwd="/mnt/c" if is_wsl() else None, timeout=30)
+        if not re.fullmatch(r"[0-9]{1,12}", str(target)):
+            die(f"--steam wants a numeric Steam app id, not {target!r}")
+        # Steam splits a steam://run URL's arguments on "/", so each one goes in percent-encoded.
+        url = (f"steam://rungameid/{target}" if not args else
+               f"steam://run/{target}//{'%20'.join(urllib.parse.quote(a, safe='') for a in args)}/")
+        try:
+            if is_windows():
+                os.startfile(url)                                     # ShellExecute: what `start <url>` did
+            else:
+                subprocess.run(["explorer.exe", url], timeout=30)     # WSL: one argv, no shell to re-read it
+        except OSError as e:
+            die(f"could not open {url}: {e}")
         return
-    exe = to_win(target)
-    subprocess.run(["cmd.exe" if is_wsl() else "cmd", "/c", "start", "", exe, *args], cwd="/mnt/c" if is_wsl() else None, timeout=30)
+    exe = to_posix(target) if is_wsl() else to_win(target)            # exec'd directly, so WSL wants /mnt/c/...
+    # Detached and with its stdio closed, the way `start` left it: an inherited pipe would hold the caller's
+    # shell open for as long as the game runs.
+    detach = dict(creationflags=DETACHED) if is_windows() else dict(start_new_session=True)
+    try:
+        subprocess.Popen([exe, *args], cwd="/mnt/c" if is_wsl() else None, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detach)
+    except OSError as e:
+        die(f"could not start {exe}: {e}")
 
 
 # --------------------------------------------------------------------------- capture

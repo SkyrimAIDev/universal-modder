@@ -27,7 +27,7 @@ videos are included.
 ```
 GTA V (story mode)                                    Minecraft 26.3 + Fabric (mc/)
   MCPassthrough.asi (gta/src)                           dev.rehan.passthrough
-    script.cpp  -- WebSocket 127.0.0.1:25599 ------->     HostLink: cam / ground / key / slot / cmd
+    script.cpp  -- WebSocket 127.0.0.1:25599/?token= ->   HostLink: cam / ground / key / slot / cmd
                 <------------------------------------     explosion events
     compositor.cpp (ReShade add-on)  <-- shared memory --  FrameExporter: world RGBA + depth, overlay RGBA
     MCPassthrough.fx: depth test + overlay                 "Local\MCPassthroughFrame"
@@ -243,8 +243,14 @@ Your off hand holds explosive fireworks for the crossbow, and you get 64 arrows.
   `--remove` takes it all out again.
 - **Saves.** `go.py save` keeps your save files as `.bak` before it replaces them.
 - **Processes.** Scripts stop GTA by its exact PID, never by name pattern.
-- **The link.** It listens on 127.0.0.1:25599 only, with no token, so any program on the machine can send it
-  commands. Close Minecraft when you're done.
+- **The link.** It listens on 127.0.0.1:25599 only, and the handshake is gated two ways: the mod writes a
+  fresh token to `%PASSTHROUGH_WIN_DIR%\passthrough.token` (default `C:\dev\passthrough`) each run and refuses
+  any client that doesn't present it as `?token=...`, and it refuses any handshake carrying an `Origin` header.
+  Loopback on its own is not a boundary — every local process can reach the port, and a web page the player
+  happens to have open can open a WebSocket to 127.0.0.1 from any origin with no CORS check in the way — while
+  `{"t":"cmd"}` runs server commands as an operator. The host scripts read the token through `host/link.py`;
+  the GTA plugin reads it on each connect attempt, so restarting Minecraft just reconnects. Close Minecraft
+  when you're done.
 - **Redistribution.** ScriptHookV and ReShade are fetched from their own sites and aren't redistributed here,
   and neither is anything from Minecraft or GTA.
 

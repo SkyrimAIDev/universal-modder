@@ -19,7 +19,9 @@ from pathlib import Path
 
 import websockets
 
-URL = "ws://127.0.0.1:25599"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "host"))
+from link import url as link_url  # noqa: E402
+
 WIN_DIR = os.environ.get("PASSTHROUGH_WIN_DIR", r"C:\dev\passthrough")
 FFMPEG = os.environ.get("UM_FFMPEG_WIN", "ffmpeg")
 SHOTS = Path(WIN_DIR) / "shots"
@@ -312,7 +314,7 @@ async def run_steps(d, steps, origin=None, h_in=0.0):
 
 async def main():
     what = sys.argv[1] if len(sys.argv) > 1 else "scout"
-    async with websockets.connect(URL, max_size=None) as ws:
+    async with websockets.connect(link_url(), max_size=None) as ws:
         await ws.recv()
         d = Director(ws)
         if what == "scout":

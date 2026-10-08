@@ -2,8 +2,10 @@
 import asyncio, json, sys
 import websockets
 
+from link import url
+
 async def main(cmds):
-    async with websockets.connect("ws://127.0.0.1:25599") as ws:
+    async with websockets.connect(url()) as ws:
         await ws.recv()
         for c in cmds:
             await ws.send(json.dumps({"t": "cmd", "c": c}))

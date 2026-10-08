@@ -19,9 +19,9 @@ from PIL import Image
 import websockets
 
 sys.path.insert(0, str(Path(__file__).parent))
+from link import url  # noqa: E402
 from mcframe import MCFrames  # noqa: E402
 
-URL = "ws://127.0.0.1:25599"
 OUT = str(Path(os.environ.get("PASSTHROUGH_WIN_DIR", r"C:\dev\passthrough")) / "fakehost_out")
 GROUND_Y = 64.0                   # host ground height; barriers fill y = 63 so their tops sit at 64
 CENTER = (0.5, GROUND_Y, 6.5)     # what the camera orbits
@@ -119,7 +119,7 @@ def third_person(now):
 async def run(seconds=12.0, outdir=OUT, mode="fp"):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    async with websockets.connect(URL, max_size=None) as ws:
+    async with websockets.connect(url(), max_size=None) as ws:
         hello = json.loads(await ws.recv())
         print("hello:", hello)
         cols = [v for x in range(-40, 41) for z in range(-40, 41) for v in (x, z, int(GROUND_Y) - 1, int(GROUND_Y) - 1)]

@@ -7,7 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def is_windows() -> bool:
@@ -57,6 +57,29 @@ def to_posix(path: str | Path) -> str:
     if is_wsl() and len(p) > 1 and p[1] == ":":
         return "/mnt/" + p[0].lower() + p[2:].replace("\\", "/")
     return p
+
+
+def safe_relpath(name: str, allow_backslash: bool = False) -> PurePosixPath | None:
+    """A path that came out of an archive or a manifest, or None when it could escape the folder it is meant
+    to land in: absolute paths, drive letters and any ".." component are refused, because pathlib drops the
+    destination entirely when it joins an absolute path. Backslashes are a legal separator inside a zip
+    member but never appear in a path we wrote ourselves, hence the flag."""
+    text = str(name)
+    if "\\" in text:
+        if not allow_backslash:
+            return None
+        text = text.replace("\\", "/")
+    p = PurePosixPath(text)
+    if p.is_absolute() or ".." in p.parts or (len(text) > 1 and text[1] == ":"):
+        return None
+    return p
+
+
+def ps_quote(s: str) -> str:
+    """A value as a PowerShell single-quoted literal. Doubling ' is the only escape inside '...', so this is
+    safe for anything: pasted in raw, a value holding a quote closes the literal and the rest of it runs as
+    PowerShell (`um win ps "x'; <command>; '"`)."""
+    return "'" + str(s).replace("'", "''") + "'"
 
 
 def data_dir() -> Path:

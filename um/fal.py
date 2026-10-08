@@ -82,6 +82,7 @@ def fal_key() -> str:
                 m = re.search(r"^\s*FAL_KEY\s*=\s*['\"]?([^'\"\s]+)", env.read_text(), re.M)
                 if m:
                     k = m.group(1)
+                    print(f"um fal: using the FAL_KEY from {env}", file=sys.stderr)
                     break
     if not k:
         die("FAL_KEY is not set. Create a key at https://fal.ai/dashboard/keys and `export FAL_KEY=...` "
@@ -91,8 +92,6 @@ def fal_key() -> str:
 
 def _req(method: str, url: str, body=None, headers=None, auth=True, raw=False, timeout=120):
     h = {"Accept": "application/json", **(headers or {})}
-    if auth:
-        h["Authorization"] = "Key " + fal_key()
     data = None
     if body is not None:
         if isinstance(body, (bytes, bytearray)):
@@ -101,6 +100,10 @@ def _req(method: str, url: str, body=None, headers=None, auth=True, raw=False, t
             data = json.dumps(body).encode()
             h.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=data, headers=h, method=method)
+    if auth:
+        # add_unredirected_header, not headers: urllib replays a request's headers on a 3xx, so a redirect
+        # off fal's host would otherwise carry FAL_KEY with it. Unredirected headers go to this host only.
+        req.add_unredirected_header("Authorization", "Key " + fal_key())
     for attempt in range(4):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -122,12 +125,26 @@ def _req(method: str, url: str, body=None, headers=None, auth=True, raw=False, t
 # --------------------------------------------------------------------------- files
 
 
+def _same_host(url, base: str) -> str | None:
+    """url, but only when it stayed on base's host and scheme. fal answers a submit with the URLs to poll,
+    and those are fetched with FAL_KEY attached, so one pointing elsewhere would hand the key over."""
+    if not isinstance(url, str):
+        return None
+    u, b = urllib.parse.urlparse(url), urllib.parse.urlparse(base)
+    if (u.scheme, u.hostname) == (b.scheme, b.hostname):
+        return url
+    print(f"ignoring the {u.scheme}://{u.hostname} URL in fal's reply (expected {b.hostname}); "
+          "polling the request id instead", file=sys.stderr)
+    return None
+
+
 def _upload_cdn(name: str, ctype: str, data: bytes) -> str:
     """fal's CDN (the route fal-client uses): a short-lived upload token, then one POST of the bytes."""
     tok = _req("POST", f"{REST}/storage/auth/token?storage_type=fal-cdn-v3", {})
     req = urllib.request.Request(f"{CDN}/files/upload", data=data, method="POST", headers={
-        "Authorization": f"{tok['token_type']} {tok['token']}", "Content-Type": ctype, "X-Fal-File-Name": name,
+        "Content-Type": ctype, "X-Fal-File-Name": name,
         "Accept": "application/json", "User-Agent": "universal-modder"})
+    req.add_unredirected_header("Authorization", f"{tok['token_type']} {tok['token']}")   # not past a redirect
     with urllib.request.urlopen(req, timeout=600) as r:
         return json.loads(r.read())["access_url"]
 
@@ -225,8 +242,8 @@ def run(endpoint: str, inp: dict, timeout: float = 1800, quiet: bool = False) ->
     """Submit to the queue, poll (printing logs to stderr), return the result JSON."""
     job = submit(endpoint, inp)
     rid = job.get("request_id")
-    status_url = job.get("status_url") or f"{QUEUE}/{endpoint}/requests/{rid}/status"
-    response_url = job.get("response_url") or f"{QUEUE}/{endpoint}/requests/{rid}"
+    status_url = _same_host(job.get("status_url"), QUEUE) or f"{QUEUE}/{endpoint}/requests/{rid}/status"
+    response_url = _same_host(job.get("response_url"), QUEUE) or f"{QUEUE}/{endpoint}/requests/{rid}"
     t0, seen, last = time.time(), 0, ""
     while True:
         st = _req("GET", status_url + ("&" if "?" in status_url else "?") + "logs=1")
