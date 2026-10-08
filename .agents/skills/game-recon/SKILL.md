@@ -38,6 +38,10 @@ Search, in order:
 1. "<game> modding" / "<game> mod loader" / "<game> modding wiki". The game's wiki often has a modding page.
 2. Nexus Mods (most popular mods show which frameworks they depend on), Thunderstore (Unity games: BepInEx
    packs), mod.io, the Steam Workshop (does the game have one? `um scan` shows installed Workshop content).
+   For Nexus, `um nexus` beats scraping and needs no account:
+   `um nexus games <name>` for the domain, then `um nexus search --game <domain> --sort downloads` to see
+   what the scene actually uses, `--category Gameplay` for mods that change play, and
+   `um nexus show <domain> <id>` for a mod's version and update date.
 3. GitHub: "<game> mod", "<game> modding api", "<game> decompile", "<game> sdk", "<engine> mod loader".
 4. Recent posts (X/Reddit/Discord announcements) for new frameworks. The loader might be days old.
 
