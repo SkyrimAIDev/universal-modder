@@ -7,15 +7,33 @@ import dev.rehan.passthrough.MobWar;
 import dev.rehan.passthrough.Nether;
 import dev.rehan.passthrough.Passthrough;
 import dev.rehan.passthrough.WorldBridge;
+import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.Locale;
 import net.minecraft.client.Minecraft;
 import org.java_websocket.WebSocket;
+import org.java_websocket.drafts.Draft;
+import org.java_websocket.exceptions.InvalidDataException;
+import org.java_websocket.framing.CloseFrame;
 import org.java_websocket.handshake.ClientHandshake;
+import org.java_websocket.handshake.ServerHandshakeBuilder;
 import org.java_websocket.server.WebSocketServer;
 
 /**
  * The host's connection: a WebSocket server on 127.0.0.1 (port 25599, or -Dpassthrough.port).
+ *
+ * <p>Loopback is not a boundary by itself: every local process can reach this port, and so can any web page
+ * the player happens to have open - a browser may open a WebSocket to 127.0.0.1 from any origin and no CORS
+ * check stands in the way. Since {@code {"t":"cmd"}} runs server commands as an operator, the handshake is
+ * gated: a request carrying an {@code Origin} header is refused (browsers always send one, host scripts
+ * never do), and every client must present the per-run token from {@code <PASSTHROUGH_WIN_DIR>/passthrough.token}
+ * as {@code ws://127.0.0.1:25599/?token=...}.
  *
  * <p>Host to Minecraft (JSON, Minecraft coordinates):
  * <ul>
@@ -30,12 +48,76 @@ import org.java_websocket.server.WebSocketServer;
  * Relayed unchanged to the other clients: {"t":"gta",...} (director commands for the host plugin), {"t":"gtastate",...}.
  */
 public final class HostLink extends WebSocketServer {
+	private static final String TOKEN_FILE = "passthrough.token";
 	private static HostLink instance;
+	private final String token;
 
 	private HostLink(final int port) {
 		super(new InetSocketAddress("127.0.0.1", port));
+		this.token = writeToken();
 		this.setReuseAddr(true);
 		this.setDaemon(true);
+	}
+
+	/** The folder every side of the link already shares (PASSTHROUGH_WIN_DIR, or -Dpassthrough.dir). */
+	static Path linkDir() {
+		String dir = System.getProperty("passthrough.dir", System.getenv("PASSTHROUGH_WIN_DIR"));
+		return Paths.get(dir == null || dir.isBlank() ? "C:\\dev\\passthrough" : dir);
+	}
+
+	/** A fresh token each run, left in a file for the host scripts to read. */
+	private static String writeToken() {
+		byte[] raw = new byte[16];
+		new SecureRandom().nextBytes(raw);
+		StringBuilder hex = new StringBuilder(raw.length * 2);
+		for (byte b : raw) {
+			hex.append(String.format(Locale.ROOT, "%02x", b));
+		}
+		String tok = hex.toString();
+		Path file = linkDir().resolve(TOKEN_FILE);
+		try {
+			Files.createDirectories(file.getParent());
+			Files.writeString(file, tok + System.lineSeparator());
+			Passthrough.LOG.info("host link token written to {}", file);
+		} catch (IOException e) {
+			Passthrough.LOG.error("could not write the host link token to {} ({}): nothing will be able to connect",
+				file, e.toString());
+		}
+		return tok;
+	}
+
+	/** The token out of "/?token=...&..."; it is hex, so there is nothing to URL-decode. */
+	private static String queryToken(final String resource) {
+		int q = resource == null ? -1 : resource.indexOf('?');
+		if (q < 0) {
+			return "";
+		}
+
+		for (String pair : resource.substring(q + 1).split("&")) {
+			if (pair.startsWith("token=")) {
+				return pair.substring("token=".length());
+			}
+		}
+
+		return "";
+	}
+
+	@Override
+	public ServerHandshakeBuilder onWebsocketHandshakeReceivedAsServer(final WebSocket conn, final Draft draft,
+			final ClientHandshake request) throws InvalidDataException {
+		if (request.hasFieldValue("Origin")) {
+			Passthrough.LOG.warn("refused a host link handshake from a browser (Origin: {})", request.getFieldValue("Origin"));
+			throw new InvalidDataException(CloseFrame.POLICY_VALIDATION, "passthrough is not driven from a browser");
+		}
+
+		byte[] want = this.token.getBytes(StandardCharsets.UTF_8);
+		byte[] got = queryToken(request.getResourceDescriptor()).getBytes(StandardCharsets.UTF_8);
+		if (!MessageDigest.isEqual(want, got)) {
+			Passthrough.LOG.warn("refused a host link handshake with a wrong or missing ?token=");
+			throw new InvalidDataException(CloseFrame.POLICY_VALIDATION, "wrong or missing ?token=");
+		}
+
+		return super.onWebsocketHandshakeReceivedAsServer(conn, draft, request);
 	}
 
 	static void launch() {

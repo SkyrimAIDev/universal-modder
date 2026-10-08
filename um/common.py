@@ -59,6 +59,13 @@ def to_posix(path: str | Path) -> str:
     return p
 
 
+def ps_quote(s: str) -> str:
+    """A value as a PowerShell single-quoted literal. Doubling ' is the only escape inside '...', so this is
+    safe for anything: pasted in raw, a value holding a quote closes the literal and the rest of it runs as
+    PowerShell (`um win ps "x'; <command>; '"`)."""
+    return "'" + str(s).replace("'", "''") + "'"
+
+
 def data_dir() -> Path:
     """Per-user state: backups, downloaded tools. Override with UM_HOME."""
     d = Path(os.environ.get("UM_HOME", Path.home() / ".universal-modder"))
