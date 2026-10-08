@@ -951,30 +951,30 @@ def mo2_instance(root, mods, profile="Default", enabled=None):
 
 
 def test_installed_reads_mo2_metadata(tmp_path):
-    from um import nexus
-    mo2 = tmp_path / "LoreRim"
-    mo2_instance(mo2, {
+    from um import mo2, nexus
+    inst = tmp_path / "LoreRim"
+    mo2_instance(inst, {
         "Alternate Start": dict(gameName="SkyrimSE", modid="272", version="4.2.0.0",
                                 installationFile="Alternate Start-272-4-2-123456789.7z", repository="Nexus"),
         "Switched Off": dict(gameName="SkyrimSE", modid="12604", version="6.0.0.0", repository="Nexus"),
         "Hand Built": dict(gameName="SkyrimSE", modid="0", version="1.0"),          # no Nexus id: skipped
     }, enabled={"Alternate Start"})
 
-    everything = nexus.installed(str(mo2))
+    everything = nexus.installed(str(inst))
     assert [m["folder"] for m in everything] == ["Alternate Start", "Switched Off"]
     assert everything[0]["mod_id"] == 272 and everything[0]["version"] == "4.2.0.0"
     assert everything[0]["enabled"] is True and everything[1]["enabled"] is False
     assert everything[0]["file"].endswith(".7z")                 # read past the padding, not truncated
 
-    on = nexus.installed(str(mo2), enabled_only=True)
+    on = nexus.installed(str(inst), enabled_only=True)
     assert [m["folder"] for m in on] == ["Alternate Start"]
-    assert nexus.mo2_setting(mo2 / "ModOrganizer.ini", "selected_profile") == "Default"   # @ByteArray unwrapped
+    assert mo2.resolve(str(inst))["selected_profile"] == "Default"      # @ByteArray unwrapped
 
 
 def test_updates_reports_rather_than_skips(tmp_path, monkeypatch):
     from um import nexus
-    mo2 = tmp_path / "inst"
-    mo2_instance(mo2, {
+    inst = tmp_path / "inst"
+    mo2_instance(inst, {
         "Needs Update": dict(gameName="SkyrimSE", modid="272", version="4.1.0.0", repository="Nexus"),
         "Up To Date": dict(gameName="SkyrimSE", modid="12604", version="6.11.0.0", repository="Nexus"),
         "Skipped In MO2": dict(gameName="SkyrimSE", modid="999", version="1.0", ignoredVersion="2.0",
@@ -995,7 +995,7 @@ def test_updates_reports_rather_than_skips(tmp_path, monkeypatch):
     monkeypatch.setattr(nexus, "fetch_mods",
                         lambda game_id, ids, progress=False: {i: remote[i] for i in ids if i in remote})
 
-    res = nexus.updates(str(mo2), progress=False)
+    res = nexus.updates(str(inst), progress=False)
     state = {r["folder"]: r["state"] for r in res["mods"]}
     assert state == {"Needs Update": "newer", "Up To Date": "same", "Skipped In MO2": "ignored"}
     unresolved = {u["folder"]: u["why"] for u in res["unresolved"]}
@@ -1065,7 +1065,7 @@ def test_install_refuses_an_archive_that_writes_outside(tmp_path, member):
 
 
 def test_install_unpacks_and_leaves_meta_for_update_checking(tmp_path, monkeypatch):
-    from um import nexus
+    from um import mo2, nexus
     archive = tmp_path / "Alternate Start-272-4-2-6-1579138592.zip"
     with backup.zipfile.ZipFile(archive, "w") as z:
         z.writestr("Alternate Start.esp", b"TES4")
@@ -1080,6 +1080,167 @@ def test_install_unpacks_and_leaves_meta_for_update_checking(tmp_path, monkeypat
     target = nexus.install(str(archive), str(mods), game="skyrimspecialedition", yes=True)
     assert (target / "Alternate Start.esp").read_bytes() == b"TES4"
     assert (target / "scripts" / "thing.pex").exists()
-    meta = nexus.read_meta(target / "meta.ini")
+    meta = mo2.read_meta(target / "meta.ini")
     assert meta["modid"] == "272" and meta["version"] == "4.2.6" and meta["repository"] == "Nexus"
     assert nexus.installed(str(mods))[0]["mod_id"] == 272    # the loop closes: updates now tracks it
+
+
+# --------------------------------------------------------------------------- mo2
+
+def test_mo2_ini_values_survive_qt_and_odd_keys(tmp_path):
+    # ModOrganizer.ini holds `1\title=` keys and bare % signs, which configparser refuses outright
+    from um import mo2
+    ini = tmp_path / "ModOrganizer.ini"
+    ini.write_text("[General]\ngameName=Skyrim Special Edition\n"
+                   "gamePath=@ByteArray(D:\\\\LoreRim\\\\Stock Game)\n"
+                   "selected_profile=@ByteArray(Community Shaders + Ciri Player)\n"
+                   "[customExecutables]\n1\\title=xEdit64\n1\\binary=D:/x/xEdit.exe\n"
+                   "2\\title=Synthesis\n%00orkingDirectory%00%00size=3\n", encoding="utf-8")
+    v = mo2.ini_values(ini)
+    assert mo2._unqt(v["gamePath"]) == r"D:\LoreRim\Stock Game"          # @ByteArray + doubled backslashes
+    assert mo2._unqt(v["selected_profile"]) == "Community Shaders + Ciri Player"
+    assert mo2._unqt(v["gameName"]) == "Skyrim Special Edition"
+    inst = dict(ini=str(ini))
+    assert mo2.tools(inst) == ["xEdit64", "Synthesis"]
+
+
+def mo2_full(root, mods, profile="Default", base=None, order=None):
+    """A miniature instance. `order` is written to modlist.txt as given - i.e. highest priority first."""
+    data = Path(base) if base else root
+    (data / "profiles" / profile).mkdir(parents=True, exist_ok=True)
+    (data / "overwrite").mkdir(parents=True, exist_ok=True)
+    (data / "downloads").mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
+    ini = ["[General]", "gameName=Skyrim Special Edition", f"selected_profile=@ByteArray({profile})"]
+    if base:
+        ini.append(f"base_directory=@ByteArray({str(data).replace(chr(92), chr(92) * 2)})")
+    (root / "ModOrganizer.ini").write_text("\n".join(ini) + "\n", encoding="utf-8")
+    for name, files in mods.items():
+        d = data / "mods" / name
+        d.mkdir(parents=True, exist_ok=True)
+        for rel, body in (files or {}).items():
+            p = d / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body, encoding="utf-8")
+    lines = order if order is not None else ["+" + n for n in mods]
+    (data / "profiles" / profile / "modlist.txt").write_text(
+        "# This file was automatically generated by Mod Organizer.\n" + "\n".join(lines) + "\n", encoding="utf-8")
+    return root
+
+
+def test_mo2_modlist_priority_is_reverse_of_file_order(tmp_path):
+    # modlist.txt is written winners-first; reading it top-down inverts every conflict answer
+    from um import mo2
+    root = mo2_full(tmp_path / "List", {"Wins": None, "Middle": None, "Base": None},
+                    order=["+Wins", "-Off", "+Middle", "*DLC: Dawnguard", "+Base", "-Some Group_separator"])
+    inst = mo2.resolve(str(root))
+    rows = mo2.mod_order(inst)
+    assert [r["name"] for r in rows] == ["Wins", "Off", "Middle", "DLC: Dawnguard", "Base", "Some Group_separator"]
+    by = {r["name"]: r for r in rows}
+    assert by["Wins"]["priority"] > by["Middle"]["priority"] > by["Base"]["priority"]
+    assert by["Off"]["enabled"] is False and by["Wins"]["enabled"] is True
+    assert by["DLC: Dawnguard"]["unmanaged"] is True            # * here means base-game, not enabled
+    assert by["Some Group_separator"]["separator"] is True
+    assert mo2.enabled_mods(inst) == {"Wins", "Middle", "Base"}  # separators and * entries are not mods
+
+
+def test_mo2_resolves_a_managed_instance_base_directory(tmp_path):
+    # a managed instance keeps only the ini under %LOCALAPPDATA%; the mods are at base_directory
+    from um import mo2
+    data = tmp_path / "Elsewhere"
+    root = mo2_full(tmp_path / "IniOnly", {"A Mod": None}, base=data)
+    inst = mo2.resolve(str(root))
+    assert Path(inst["mods_dir"]) == data / "mods"
+    assert Path(inst["profiles_dir"]) == data / "profiles"
+    assert inst["portable"] is False                            # no ModOrganizer.exe beside the ini
+    assert [m["folder"] for m in mo2.installed_mods(inst)] == []  # no meta.ini, so nothing to report
+
+
+def test_mo2_conflict_winner_is_the_highest_priority_provider(tmp_path):
+    from um import mo2
+    rel = "meshes/actors/character/skeleton.nif"
+    root = mo2_full(tmp_path / "List", {
+        "Skeleton Fix": {rel: "fix"},
+        "XP32": {rel: "xp32"},
+        "Unrelated": {"textures/x.dds": "tex"},
+        "Disabled Fix": {rel: "never"},
+    }, order=["+Skeleton Fix", "+XP32", "-Disabled Fix", "+Unrelated"])
+    inst = mo2.resolve(str(root))
+
+    res = mo2.winner(inst, rel)
+    assert res["winner"] == "Skeleton Fix"                      # nearer the top of modlist.txt = wins
+    assert [p["mod"] for p in res["providers"]] == ["Skeleton Fix", "XP32"]   # the disabled one is absent
+
+    # overwrite/ sits above every mod, which is why leftovers there silently win
+    over = Path(inst["overwrite_dir"]) / rel
+    over.parent.mkdir(parents=True, exist_ok=True)
+    over.write_text("stale", encoding="utf-8")
+    assert mo2.winner(inst, rel)["winner"] == "<overwrite>"
+
+    assert mo2.winner(inst, "nothing/here.nif")["providers"] == []
+    with pytest.raises(SystemExit):
+        mo2.winner(inst, "../escape.nif")
+
+
+def test_mo2_mod_conflicts_reports_both_directions(tmp_path):
+    from um import mo2
+    root = mo2_full(tmp_path / "List", {
+        "Top": {"a.nif": "top"},
+        "Middle": {"a.nif": "mid", "b.nif": "mid"},
+        "Bottom": {"b.nif": "bottom"},
+    }, order=["+Top", "+Middle", "+Bottom"])
+    inst = mo2.resolve(str(root))
+    res = mo2.mod_conflicts(inst, "Middle")
+    assert [r["file"] for r in res["loses"]] == ["a.nif"] and res["loses"][0]["against"] == "Top"
+    assert [r["file"] for r in res["wins"]] == ["b.nif"]
+    assert mo2.mod_conflicts(inst, "Middle", limit=1)["truncated"] is True
+
+
+def test_mo2_check_counts_separators_as_present(tmp_path):
+    # MO2 creates mods/<name>_separator/, so excluding separators made every one look like an orphan
+    from um import mo2
+    root = mo2_full(tmp_path / "List", {"Real Mod": None, "A Group_separator": None, "Left Over": None},
+                    order=["+Real Mod", "-A Group_separator", "+Gone From Disk", "*DLC: Dawnguard"])
+    inst = mo2.resolve(str(root))
+    res = mo2.check(inst)
+    assert "A Group_separator" not in " ".join(res["notes"])     # the separator is not an orphan
+    assert "DLC: Dawnguard" not in " ".join(res["problems"])     # nor is an unmanaged entry missing
+    assert any("Gone From Disk" in p for p in res["problems"])   # listed with no folder: a real problem
+    assert any("Left Over" in n for n in res["notes"])           # on disk, never listed: a note
+
+
+def test_mo2_plugins_reads_order_and_enabled_separately(tmp_path):
+    # plugins.txt's `*` means enabled - the opposite kind of marker from modlist.txt's `*`
+    from um import mo2
+    root = mo2_full(tmp_path / "List", {"A Mod": None})
+    prof = Path(mo2.resolve(str(root))["profiles_dir"]) / "Default"
+    (prof / "plugins.txt").write_text("# generated\n*Skyrim.esm\nDisabled.esp\n*Mine.esp\n", encoding="utf-8")
+    (prof / "loadorder.txt").write_text("Skyrim.esm\nDisabled.esp\nMine.esp\n", encoding="utf-8")
+    rows = mo2.plugins(mo2.resolve(str(root)))
+    assert [r["name"] for r in rows] == ["Skyrim.esm", "Disabled.esp", "Mine.esp"]
+    assert [r["enabled"] for r in rows] == [True, False, True]
+
+
+def test_mo2_run_refuses_a_tool_the_instance_does_not_have(tmp_path):
+    from um import mo2
+    root = mo2_full(tmp_path / "List", {"A Mod": None})
+    (root / "ModOrganizer.exe").write_bytes(b"MZ")
+    inst = mo2.resolve(str(root))
+    with pytest.raises(SystemExit):
+        mo2.run(inst, "NotConfigured")
+
+
+def test_vortex_staging_folder_names_carry_the_mod_id(tmp_path):
+    # Vortex keeps no meta.ini, but names each staging folder after the Nexus archive
+    from um import nexus
+    staging = tmp_path / "Vortex Mods" / "skyrimse"
+    staging.mkdir(parents=True)
+    (staging / "__vortex_staging_folder").write_text('{"instance":"x","game":"skyrimse"}', encoding="utf-8")
+    for name in ["'Pumping Iron' and 'Hand to Hand (Adamant)' Patch-97490-1-0-1724779805",
+                 "(beta) Wade In Water Animations-34006-1-42-1649385478",
+                 "Something Renamed By Hand"]:
+        (staging / name).mkdir()
+    rows = nexus.installed(str(staging))
+    assert {r["mod_id"] for r in rows} == {97490, 34006}       # the renamed folder drops out, not guessed at
+    assert {r["version"] for r in rows} == {"1.0", "1.42"}
+    assert nexus.from_name("Thing-272-4-2-6-1579138592")["mod_id"] == 272
