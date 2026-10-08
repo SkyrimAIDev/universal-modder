@@ -9,6 +9,7 @@ Subcommands (see `um --help`):
   video     compile styled showcase videos, trim, mux
   win       Windows (and WSL): screenshots, recording with game-only audio, input, processes
   backup    snapshot and restore save folders before you touch them
+  mo2       Mod Organizer 2: read an instance, resolve conflicts, run a tool inside its VFS
   nexus     Nexus Mods: find gameplay mods, check a setup for updates, download, install
   publish   lint a mod folder before sharing: game files, decompiled code, secrets, credits
   kb        the knowledge base: search prior field notes, write your own, check it, open a PR

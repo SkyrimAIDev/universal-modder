@@ -26,7 +26,6 @@ and a downloaded archive is a stranger's zip, so install refuses any member whos
 """
 from __future__ import annotations
 
-import configparser
 import json
 import os
 import re
@@ -40,6 +39,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+from um import mo2
 from um.common import die, emit, safe_relpath, to_posix
 
 GRAPHQL = "https://api.nexusmods.com/v2/graphql"
@@ -246,87 +246,46 @@ def file_bytes(f: dict) -> int:
 # --------------------------------------------------------------------------- Mod Organizer 2 setups
 
 
-META_KEYS = ("gameName", "modid", "version", "newestVersion", "installationFile", "repository", "ignoredVersion")
-
-
-def read_meta(path: Path) -> dict:
-    """The handful of [General] keys we need out of a mod's meta.ini. Scanned line by line on purpose: MO2
-    pastes the whole Nexus description into these files, so they run to tens of KB and configparser would
-    read (and choke on) all of it."""
-    want = {k.lower(): k for k in META_KEYS}
-    found: dict[str, str] = {}
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                key, sep, value = line.partition("=")
-                real = want.get(key.strip().lower())
-                if sep and real and real not in found:
-                    found[real] = value.strip().strip('"')
-                if len(found) == len(want):
-                    break
-    except OSError:
-        return {}
-    return found
-
-
-def mo2_root(path: Path) -> Path | None:
-    return path if (path / "ModOrganizer.ini").exists() else None
-
-
-def mo2_setting(ini: Path, key: str) -> str | None:
-    """A value out of ModOrganizer.ini, unwrapping Qt's @ByteArray(...) form."""
-    cp = configparser.RawConfigParser(strict=False)
-    try:
-        cp.read(ini, encoding="utf-8")
-    except (configparser.Error, OSError):
-        return None
-    for section in cp.sections():
-        if cp.has_option(section, key):
-            v = (cp.get(section, key) or "").strip()
-            m = re.fullmatch(r"@ByteArray\((.*)\)", v, re.S)
-            return (m.group(1) if m else v).replace("\\\\", "\\")
-    return None
-
-
-def enabled_mods(root: Path, profile: str | None = None) -> set[str] | None:
-    """The mod folder names a profile has switched on ("+Name" in its modlist.txt), or None if unreadable."""
-    name = profile or mo2_setting(root / "ModOrganizer.ini", "selected_profile")
-    if not name:
-        return None
-    listing = root / "profiles" / name / "modlist.txt"
-    if not listing.exists():
-        die(f"no such profile: {listing} (profiles here: "
-            + ", ".join(sorted(p.name for p in (root / 'profiles').glob('*') if p.is_dir())) + ")")
-    on = set()
-    for line in listing.read_text(encoding="utf-8", errors="replace").splitlines():
-        if line.startswith("+") and not line.endswith("_separator"):
-            on.add(line[1:])
-    return on
-
-
 def installed(path: str, profile: str | None = None, enabled_only: bool = False) -> list[dict]:
-    """Every Nexus-sourced mod in an MO2 instance (or any folder of mod folders holding a meta.ini)."""
+    """Every Nexus-sourced mod in an MO2 instance, or in any plain folder of mod folders with a meta.ini.
+    The MO2 reading lives in um.mo2, which also resolves a managed instance's base_directory."""
     root = Path(to_posix(path)).expanduser()
-    if not root.is_dir():
-        die(f"not a folder: {root}")
-    mods_dir = root / "mods" if (root / "mods").is_dir() else root
-    on = enabled_mods(root, profile) if (mo2_root(root) or profile) else None
-    if enabled_only and on is None:
-        die(f"--enabled-only needs an MO2 instance (a folder with ModOrganizer.ini); {root} has none")
-    out = []
-    for meta in sorted(mods_dir.glob("*/meta.ini")):
-        folder = meta.parent.name
-        if enabled_only and on is not None and folder not in on:
-            continue
-        m = read_meta(meta)
-        mod_id = (m.get("modid") or "").strip()
-        if not mod_id.isdigit() or int(mod_id) <= 0:
-            continue                                  # hand-made or Wabbajack-built mods carry no Nexus id
-        out.append(dict(folder=folder, mod_id=int(mod_id), game=m.get("gameName") or "",
-                        version=m.get("version") or "", newest=m.get("newestVersion") or "",
-                        ignored=m.get("ignoredVersion") or "", file=m.get("installationFile") or "",
-                        enabled=None if on is None else folder in on))
-    return out
+    inst = None
+    if (root / "ModOrganizer.ini").is_file() or not root.is_dir():
+        try:
+            inst = mo2.resolve(str(path))      # an instance folder, its ini, or a managed instance's name
+        except SystemExit:
+            inst = None
+    if inst:
+        rows = mo2.installed_mods(inst, profile, enabled_only)
+    else:
+        if not root.is_dir():
+            die(f"not a folder, and not an MO2 instance: {root}")
+        if enabled_only:
+            die(f"--enabled-only needs an MO2 instance (a folder holding ModOrganizer.ini); {root} has none")
+        # Point it at an instance's base folder or straight at a mods folder; both are common.
+        mods_dir = root / "mods" if (root / "mods").is_dir() else root
+        rows = []
+        for folder in sorted(p for p in mods_dir.glob("*") if p.is_dir()):
+            meta = folder / "meta.ini"
+            if meta.is_file():
+                m = mo2.read_meta(meta)
+                mod_id = (m.get("modid") or "").strip()
+                rows.append(dict(folder=folder.name, mod_id=int(mod_id) if mod_id.isdigit() else 0,
+                                 game=m.get("gameName") or "", version=m.get("version") or "",
+                                 newest=m.get("newestVersion") or "", ignored=m.get("ignoredVersion") or "",
+                                 file=m.get("installationFile") or "", repository=m.get("repository") or "",
+                                 enabled=None, priority=None))
+                continue
+            # No meta.ini: Vortex names its staging folders after the Nexus archive, so the id is in the
+            # folder name. Nothing records a version there beyond the one the name carries.
+            named = from_name(folder.name)
+            if named:
+                rows.append(dict(folder=folder.name, mod_id=named["mod_id"], game="",
+                                 version=named.get("version") or "", newest="", ignored="",
+                                 file=folder.name, repository="", enabled=None, priority=None))
+    # A hand-made or Wabbajack-built mod carries no Nexus id, so there is nothing to check it against.
+    return [r for r in rows if r["mod_id"] > 0]
 
 
 # --------------------------------------------------------------------------- update checking
@@ -513,19 +472,24 @@ def download(out: str = "downloads", game: str | None = None, mod_id: int | None
 # --------------------------------------------------------------------------- installing
 
 
-#   "(2)Barbarian Bodypaints - CBBE-31826-1-0-1579138592.7z" -> name, 31826, 1-0, stamp
+#   "(2)Barbarian Bodypaints - CBBE-31826-1-0-1579138592" -> name, 31826, 1-0, stamp
 # Both <name> and <ver> are lazy on purpose: a greedy name swallows the mod id (it reads the trailing "-1-0-"
 # as id and version), and a greedy version swallows the timestamp.
-NEXUS_FILENAME = re.compile(r"^(?P<name>.+?)-(?P<mod_id>\d+)-(?P<ver>\w[\w.-]*?)-(?P<stamp>\d{9,})\.\w+$")
+NEXUS_STEM = re.compile(r"^(?P<name>.+?)-(?P<mod_id>\d+)-(?P<ver>\w[\w.-]*?)-(?P<stamp>\d{9,})$")
 
 
-def from_filename(path: Path) -> dict:
-    """Nexus names a download "<mod name>-<mod id>-<version with dashes>-<unix stamp>.<ext>", which is
-    where MO2 gets a mod's id when you install by hand. Best effort: flags win over this."""
-    m = NEXUS_FILENAME.match(path.name)
+def from_name(stem: str) -> dict:
+    """Nexus names a download "<mod name>-<mod id>-<version with dashes>-<unix stamp>", which is where MO2
+    gets a mod's id when you install by hand - and what Vortex names its staging folders, so the same parse
+    recovers mod ids from a Vortex setup without reading its database. Best effort: flags win over it."""
+    m = NEXUS_STEM.match(str(stem))
     if not m:
         return {}
     return dict(mod_id=int(m.group("mod_id")), version=m.group("ver").replace("-", "."), name=m.group("name"))
+
+
+def from_filename(path: Path) -> dict:
+    return from_name(Path(path).stem)
 
 
 def neighbour_game(mods_dir: Path) -> str:
@@ -534,7 +498,7 @@ def neighbour_game(mods_dir: Path) -> str:
     into already holds the right answer; an empty string when it is the first mod in a fresh folder."""
     counts: dict[str, int] = {}
     for meta in sorted(mods_dir.glob("*/meta.ini"))[:200]:
-        name = read_meta(meta).get("gameName") or ""
+        name = mo2.read_meta(meta).get("gameName") or ""
         if name:
             counts[name] = counts.get(name, 0) + 1
     return max(counts, key=counts.get) if counts else ""
