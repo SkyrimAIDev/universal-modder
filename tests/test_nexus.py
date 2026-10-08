@@ -51,30 +51,30 @@ def mo2_instance(root, mods, profile="Default", enabled=None):
 
 
 def test_installed_reads_mo2_metadata(tmp_path):
-    from um import nexus
-    mo2 = tmp_path / "LoreRim"
-    mo2_instance(mo2, {
+    from um import mo2, nexus
+    inst = tmp_path / "LoreRim"
+    mo2_instance(inst, {
         "Alternate Start": dict(gameName="SkyrimSE", modid="272", version="4.2.0.0",
                                 installationFile="Alternate Start-272-4-2-123456789.7z", repository="Nexus"),
         "Switched Off": dict(gameName="SkyrimSE", modid="12604", version="6.0.0.0", repository="Nexus"),
         "Hand Built": dict(gameName="SkyrimSE", modid="0", version="1.0"),          # no Nexus id: skipped
     }, enabled={"Alternate Start"})
 
-    everything = nexus.installed(str(mo2))
+    everything = nexus.installed(str(inst))
     assert [m["folder"] for m in everything] == ["Alternate Start", "Switched Off"]
     assert everything[0]["mod_id"] == 272 and everything[0]["version"] == "4.2.0.0"
     assert everything[0]["enabled"] is True and everything[1]["enabled"] is False
     assert everything[0]["file"].endswith(".7z")                 # read past the padding, not truncated
 
-    on = nexus.installed(str(mo2), enabled_only=True)
+    on = nexus.installed(str(inst), enabled_only=True)
     assert [m["folder"] for m in on] == ["Alternate Start"]
-    assert nexus.mo2_setting(mo2 / "ModOrganizer.ini", "selected_profile") == "Default"   # @ByteArray unwrapped
+    assert mo2.resolve(str(inst))["selected_profile"] == "Default"      # @ByteArray unwrapped
 
 
 def test_updates_reports_rather_than_skips(tmp_path, monkeypatch):
     from um import nexus
-    mo2 = tmp_path / "inst"
-    mo2_instance(mo2, {
+    inst = tmp_path / "inst"
+    mo2_instance(inst, {
         "Needs Update": dict(gameName="SkyrimSE", modid="272", version="4.1.0.0", repository="Nexus"),
         "Up To Date": dict(gameName="SkyrimSE", modid="12604", version="6.11.0.0", repository="Nexus"),
         "Skipped In MO2": dict(gameName="SkyrimSE", modid="999", version="1.0", ignoredVersion="2.0",
@@ -95,7 +95,7 @@ def test_updates_reports_rather_than_skips(tmp_path, monkeypatch):
     monkeypatch.setattr(nexus, "fetch_mods",
                         lambda game_id, ids, progress=False: {i: remote[i] for i in ids if i in remote})
 
-    res = nexus.updates(str(mo2), progress=False)
+    res = nexus.updates(str(inst), progress=False)
     state = {r["folder"]: r["state"] for r in res["mods"]}
     assert state == {"Needs Update": "newer", "Up To Date": "same", "Skipped In MO2": "ignored"}
     unresolved = {u["folder"]: u["why"] for u in res["unresolved"]}
@@ -165,7 +165,7 @@ def test_install_refuses_an_archive_that_writes_outside(tmp_path, member):
 
 
 def test_install_unpacks_and_leaves_meta_for_update_checking(tmp_path, monkeypatch):
-    from um import nexus
+    from um import mo2, nexus
     archive = tmp_path / "Alternate Start-272-4-2-6-1579138592.zip"
     with backup.zipfile.ZipFile(archive, "w") as z:
         z.writestr("Alternate Start.esp", b"TES4")
@@ -180,6 +180,8 @@ def test_install_unpacks_and_leaves_meta_for_update_checking(tmp_path, monkeypat
     target = nexus.install(str(archive), str(mods), game="skyrimspecialedition", yes=True)
     assert (target / "Alternate Start.esp").read_bytes() == b"TES4"
     assert (target / "scripts" / "thing.pex").exists()
-    meta = nexus.read_meta(target / "meta.ini")
+    meta = mo2.read_meta(target / "meta.ini")
     assert meta["modid"] == "272" and meta["version"] == "4.2.6" and meta["repository"] == "Nexus"
     assert nexus.installed(str(mods))[0]["mod_id"] == 272    # the loop closes: updates now tracks it
+
+
