@@ -1,8 +1,10 @@
 import asyncio, json
 import websockets
 
+from link import url
+
 async def main():
-    async with websockets.connect("ws://127.0.0.1:25599") as ws:
+    async with websockets.connect(url()) as ws:
         print(await ws.recv())
         # keep the host "attached" (explosion events are only sent while a host drives the camera)
         async def cam():

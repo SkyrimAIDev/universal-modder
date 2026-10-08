@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import websockets  # noqa: E402
-from director import URL, WIN_DIR, Director, run_steps  # noqa: E402
+from director import WIN_DIR, Director, link_url, run_steps  # noqa: E402
 
 STOP = Path(WIN_DIR) / "takes" / "STOP"
 START = [58.0, -1712.0, 29.5]  # GTA: the east end of the Davis car park, facing west down it
@@ -38,7 +38,7 @@ SETUP = [
 
 
 async def main():
-    async with websockets.connect(URL, max_size=None) as ws:
+    async with websockets.connect(link_url(), max_size=None) as ws:
         await ws.recv()
         d = Director(ws)
         await d.gta("safe")

@@ -318,8 +318,15 @@ def _seg_dur(seg, bpm):
 
 
 def _fill_filter(fill, W, H, zoom=1.0, crop=None):
-    pre = f"crop={crop[2]}:{crop[3]}:{crop[0]}:{crop[1]}," if crop else ""
-    z = f",scale=iw*{zoom}:ih*{zoom},crop={W}:{H}" if zoom and zoom != 1.0 else ""
+    # An EDL is JSON, so every number that lands in a filter string is coerced here: a string would be read
+    # as more filter syntax, and ffmpeg filters can reach the filesystem (movie=, amovie=).
+    if crop:
+        x, y, w, h = (int(v) for v in crop)
+        pre = f"crop={w}:{h}:{x}:{y},"
+    else:
+        pre = ""
+    zoom = float(zoom or 1.0)
+    z = f",scale=iw*{zoom}:ih*{zoom},crop={W}:{H}" if zoom != 1.0 else ""
     if fill == "crop":
         return f"{pre}scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H}{z}"
     if fill == "pad":
@@ -339,7 +346,7 @@ def render_segment(i, seg, edl, work: Path, W, H, fps, dur, t_in, t_out, total_n
         png = work / f"card_{i:02d}.png"
         card(seg["card"], W, H, theme, png)
         frames = max(1, round(dur * fps))
-        zin = seg["card"].get("push", 0.04)
+        zin = float(seg["card"].get("push", 0.04))
         vf = (f"scale={W * 2}:{H * 2},zoompan=z='1+{zin}*on/{frames}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={fps},"
               f"format=yuv420p")
         ff("-loop", "1", "-framerate", fps, "-t", f"{dur:.3f}", "-i", png, "-f", "lavfi", "-t", f"{dur:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
@@ -423,8 +430,8 @@ def compile_edl(edl_path, out, preview=False, keep=False):
             for k in ("bg", "logo"):
                 if seg["card"].get(k) and not str(seg["card"][k]).startswith("#"):
                     seg["card"][k] = rel(seg["card"][k])
-    W, H = edl.get("size", [1920, 1080])
-    fps = edl.get("fps", 30)
+    W, H = (int(v) for v in edl.get("size", [1920, 1080]))
+    fps = int(edl.get("fps", 30))
     if preview:
         W, H, fps = W // 2, H // 2, min(fps, 30)
     bpm = edl.get("bpm")

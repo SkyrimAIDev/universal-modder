@@ -23,7 +23,7 @@ import shutil
 import subprocess
 import time
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from um.common import data_dir, die
 
@@ -71,7 +71,10 @@ def sync(quiet: bool = False) -> Path:
     tmp = root.with_name("knowledge.tmp")
     shutil.rmtree(tmp, ignore_errors=True)
     for p in paths:
-        dst = tmp / p[len("knowledge/"):]
+        rel = PurePosixPath(p[len("knowledge/"):])
+        if rel.is_absolute() or ".." in rel.parts:   # a git tree can't hold these; we write these paths, so check
+            die(f"{REPO} lists a path we won't write: {p!r}")
+        dst = tmp / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{p}"
         with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "universal-modder"}), timeout=60) as r:

@@ -20,13 +20,29 @@ import time
 import zipfile
 from pathlib import Path
 
-from um.common import data_dir, die, to_posix
+from um.common import data_dir, die, safe_relpath, to_posix
 
 
 def _root(name: str) -> Path:
     d = data_dir() / "backups" / name
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _safe_dst(root: Path, rel: str) -> Path:
+    """Where rel lands under root, refusing anything that leaves it. A snapshot's file list comes out of the
+    zip's own manifest, and a snapshot can arrive from anywhere (handed over, downloaded, --snapshot FILE),
+    so "../../x" or an absolute path would otherwise have restore write outside the folder being restored -
+    pathlib drops root entirely when the right-hand side is absolute."""
+    p = safe_relpath(rel)
+    if p is None:
+        die(f"unsafe path in the snapshot's manifest: {rel!r} - this snapshot is not one we wrote")
+    dst = root / p
+    try:
+        dst.resolve().relative_to(root.resolve())     # also catches a symlink inside root pointing out of it
+    except ValueError:
+        die(f"unsafe path in the snapshot's manifest: {rel!r} - it would land outside {root}")
+    return dst
 
 
 def _scan(src: Path) -> dict:
@@ -84,7 +100,10 @@ def snapshots(name: str) -> list[Path]:
 
 def _manifest(zp: Path) -> dict:
     with zipfile.ZipFile(zp) as z:
-        return json.loads(z.read("_um_manifest.json"))
+        m = json.loads(z.read("_um_manifest.json"))
+    if not isinstance(m, dict) or not isinstance(m.get("files"), dict):
+        die(f"{zp} has no usable _um_manifest.json")
+    return m
 
 
 def diff(name: str, target: str | None = None, snapshot: str | None = None) -> dict:
@@ -106,7 +125,7 @@ def restore(name: str, to: str | None = None, snapshot: str | None = None, clean
     if not zp:
         die(f"no snapshots for {name}")
     m = _manifest(zp)
-    t = Path(to_posix(to or m["source"]))
+    t = Path(to_posix(to or m["source"]))     # without --to the folder comes from the zip: --yes confirms it
     d = diff(name, str(t), str(zp))
     print(f"restore {zp.name} -> {t}: {len(d['changed'])} changed, {len(d['removed'])} missing, {len(d['added'])} new since"
           + (" (new files will be deleted: --clean)" if clean else " (new files kept)"))
@@ -115,14 +134,15 @@ def restore(name: str, to: str | None = None, snapshot: str | None = None, clean
     if t.is_dir():
         create(str(t), name + "-pre-restore", note=f"automatic, before restoring {zp.name}")
     t.mkdir(parents=True, exist_ok=True)
+    targets = {rel: _safe_dst(t, rel) for rel in m["files"]}      # every path checked before anything is written
     with zipfile.ZipFile(zp) as z:
-        for rel in m["files"]:
-            (t / rel).parent.mkdir(parents=True, exist_ok=True)
-            with z.open(rel) as src, open(t / rel, "wb") as dst:
+        for rel, out in targets.items():
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(rel) as src, open(out, "wb") as dst:
                 dst.write(src.read())
     if clean:
         for rel in d["added"]:
-            (t / rel).unlink(missing_ok=True)
+            _safe_dst(t, rel).unlink(missing_ok=True)
     print("restored", len(m["files"]), "files")
 
 

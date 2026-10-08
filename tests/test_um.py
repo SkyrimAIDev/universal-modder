@@ -756,3 +756,154 @@ def test_path_hook_writes_a_posix_root(tmp_path):
     value = env_file.read_text().split('"')[1]
     prefix = value[:value.index("/bin:$PATH")]
     assert prefix.startswith("/") and ":" not in prefix, value
+
+
+# --------------------------------------------------------------------------- injection and path containment
+
+PAYLOAD = r"x'; Set-Content -Path C:\pwned.txt -Value hi; Get-Process -Name 'nope"
+
+
+def ps_literal(script: str, after: str = "-Name ", until: str = " -ErrorAction") -> str:
+    """The single-quoted literal a script passes to -Name, decoded by PowerShell's rules ('' is one quote).
+    Raises if the value is not wholly inside one literal - which is exactly what injection looks like."""
+    literal = script.split(after, 1)[1].split(until, 1)[0].strip()
+    assert literal[0] == "'" and literal[-1] == "'", literal
+    body = literal[1:-1]
+    assert "'" not in body.replace("''", ""), f"an unescaped quote ends the literal early: {literal}"
+    return body.replace("''", "'")
+
+
+def test_process_name_cannot_escape_the_powershell_literal(monkeypatch):
+    # `um win ps "x'; <command>; '"` closed the -Name literal and ran the rest as PowerShell
+    from um import common, win
+    assert common.ps_quote("a'b") == "'a''b'" and common.ps_quote("plain") == "'plain'"
+    seen = {}
+    monkeypatch.setattr(win, "powershell", lambda script, **k: seen.setdefault("script", script) and "")
+
+    win.processes(PAYLOAD)
+    assert ps_literal(seen["script"]) == PAYLOAD + "*"      # the whole payload is one value, not a statement
+
+    seen.clear()
+    win.pid_of(PAYLOAD + ".exe")
+    assert ps_literal(seen["script"]) == PAYLOAD
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" or shutil.which("powershell.exe")), reason="needs Windows PowerShell")
+def test_process_name_injection_does_not_run(tmp_path):
+    # the same payload against the real shell: the marker file must not appear
+    from um import win
+    marker = tmp_path / "pwned.txt"
+    win.processes(f"x'; Set-Content -Path '{marker}' -Value hi; Get-Process -Name 'nope")
+    assert not marker.exists()
+
+
+def test_launch_never_hands_metacharacters_to_cmd(monkeypatch, tmp_path):
+    # cmd.exe re-parses its command line, so `--steam "480&calc"` through `cmd /c start` also started calc
+    from um import win
+    monkeypatch.setattr(win, "is_wsl", lambda: False)
+    monkeypatch.setattr(win, "is_windows", lambda: True)
+    started, spawned = [], []
+    monkeypatch.setattr(win.os, "startfile", lambda url: started.append(url), raising=False)
+    monkeypatch.setattr(win.subprocess, "Popen", lambda cmd, **kw: spawned.append(cmd))
+    monkeypatch.setattr(win.subprocess, "run", lambda *a, **k: pytest.fail(f"spawned a shell: {a}"))
+
+    with pytest.raises(SystemExit):
+        win.launch("480&calc", [], steam=True)
+    assert not started
+
+    win.launch("105600", ["-windowed", "a b&c"], steam=True)
+    assert started == ["steam://run/105600//-windowed%20a%20b%26c/"]   # & percent-encoded, not a second command
+
+    exe = tmp_path / "game.exe"
+    exe.write_bytes(b"MZ")
+    win.launch(str(exe), ["-x&whoami"])
+    assert len(spawned) == 1 and spawned[0][1:] == ["-x&whoami"]       # argv, so cmd never sees the &
+    assert Path(spawned[0][0]).name == "game.exe"
+
+
+@pytest.mark.parametrize("member", ["../escaped.txt", "ffmpeg/../../escaped.txt", "/abs/escaped.txt", "C:/abs/escaped.txt"])
+def test_ffmpeg_zip_members_must_stay_inside(tmp_path, member):
+    from um import win
+    z = tmp_path / "ffmpeg.zip"
+    with backup.zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("ffmpeg-build/bin/ffmpeg.exe", b"x")
+        zf.writestr(member, b"pwned")
+    with pytest.raises(SystemExit):
+        win._extract_zip(z, tmp_path / "dest")
+    assert not list((tmp_path / "dest").rglob("escaped.txt")) if (tmp_path / "dest").exists() else True
+
+    with backup.zipfile.ZipFile(z, "w") as zf:               # the real shape still extracts
+        zf.writestr("ffmpeg-build/bin/ffmpeg.exe", b"x")
+    assert win._extract_zip(z, tmp_path / "ok") == "ffmpeg-build"
+    assert (tmp_path / "ok" / "ffmpeg-build" / "bin" / "ffmpeg.exe").exists()
+
+
+@pytest.mark.parametrize("rel", ["../escaped.txt", "a/../../escaped.txt", "/etc/escaped.txt", "C:/Windows/escaped.txt",
+                                 r"..\escaped.txt"])
+def test_restore_refuses_a_snapshot_that_writes_outside_the_target(tmp_path, backup_same_second, rel):
+    # a snapshot's file list comes out of the zip, and snapshots travel between machines
+    root = tmp_path / "data" / "backups" / "evil"
+    root.mkdir(parents=True)
+    target = tmp_path / "target"
+    manifest = {"source": str(target), "created": "20261006-120000", "note": "", "files": {rel: {"size": 5, "sha1": "x"}}}
+    with backup.zipfile.ZipFile(root / "20261006-120000.zip", "w") as z:
+        z.writestr(rel, b"pwned")
+        z.writestr("_um_manifest.json", json.dumps(manifest))
+
+    with pytest.raises(SystemExit):
+        backup.restore("evil", to=str(target), yes=True)
+    assert not list(tmp_path.rglob("escaped.txt"))
+
+
+def test_restore_still_puts_ordinary_paths_back(tmp_path, backup_same_second):
+    src = tmp_path / "src"
+    make(src, {"save.dat": "keep", "deep/nested/world.wld": "also keep"})
+    backup.create(str(src), name="ok")
+    shutil.rmtree(src)
+    backup.restore("ok", yes=True)
+    assert (src / "save.dat").read_text() == "keep"
+    assert (src / "deep" / "nested" / "world.wld").read_text() == "also keep"
+
+
+def test_edl_numbers_cannot_add_filters():
+    # crop/zoom come from JSON; as strings they used to land in -filter_complex verbatim
+    assert video._fill_filter("crop", 1920, 1080, crop=[1, 2, 3, 4]).startswith("crop=3:4:1:2,")
+    with pytest.raises(ValueError):
+        video._fill_filter("crop", 1920, 1080, crop=[0, 0, "1920,movie=/etc/passwd", 1080])
+    with pytest.raises(ValueError):
+        video._fill_filter("crop", 1920, 1080, zoom="1.5,movie=/etc/passwd")
+    assert "movie=" not in video._fill_filter("crop", 1920, 1080, zoom=1.5)
+
+
+def test_fal_key_is_not_replayed_on_a_redirect(monkeypatch):
+    # urllib puts a request's headers back on a 3xx; the key must only ever go to the host it belongs to
+    monkeypatch.setenv("FAL_KEY", "id:secret")
+    captured = {}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(req, timeout=None):
+        captured["req"] = req
+        return Resp()
+
+    monkeypatch.setattr(fal.urllib.request, "urlopen", fake_urlopen)
+    fal._req("GET", f"{fal.QUEUE}/fal-ai/x/requests/1/status")
+    req = captured["req"]
+    assert req.get_header("Authorization") == "Key id:secret"          # still sent to fal
+    assert "authorization" in {k.lower() for k in req.unredirected_hdrs}
+    assert "authorization" not in {k.lower() for k in req.headers}     # so a redirect cannot carry it
+
+
+def test_fal_polls_only_fal_urls(capsys):
+    assert fal._same_host(f"{fal.QUEUE}/fal-ai/x/requests/1/status", fal.QUEUE) is not None
+    for bad in ("https://evil.example/steal", "http://queue.fal.run/x", "queue.fal.run/x", None, 42):
+        assert fal._same_host(bad, fal.QUEUE) is None
+    assert "ignoring" in capsys.readouterr().err

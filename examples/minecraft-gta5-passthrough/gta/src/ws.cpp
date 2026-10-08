@@ -2,9 +2,24 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <vector>
 
 #pragma comment(lib, "ws2_32.lib")
+
+// The mod writes a fresh token to <PASSTHROUGH_WIN_DIR>\passthrough.token each run and refuses a handshake
+// without it. Loopback is not a boundary on its own: every local process can reach the port, and so can a
+// web page the player happens to have open. Read per connect attempt, so a Minecraft restart reconnects.
+static std::string linkToken()
+{
+	const char *dir = std::getenv("PASSTHROUGH_WIN_DIR");
+	const std::string base = dir && *dir ? std::string(dir) : std::string("C:\\dev\\passthrough");
+	std::ifstream in(base + "\\passthrough.token");
+	std::string token;
+	in >> token; // hex, so the first whitespace-delimited word is the whole token
+	return token;
+}
 
 void WsClient::start(const char *host, int port)
 {
@@ -41,7 +56,7 @@ bool WsClient::open()
 	setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char *>(&noDelay), sizeof(noDelay));
 
 	const std::string request =
-		"GET / HTTP/1.1\r\nHost: " + m_host + ":" + std::to_string(m_port) +
+		"GET /?token=" + linkToken() + " HTTP/1.1\r\nHost: " + m_host + ":" + std::to_string(m_port) +
 		"\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
 	if (::send(s, request.data(), static_cast<int>(request.size()), 0) != static_cast<int>(request.size()))
 	{
