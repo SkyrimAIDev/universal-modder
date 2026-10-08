@@ -24,6 +24,8 @@ repo, they almost always want to **mod a game**, or to learn how a game was modd
     - `win`: launch, screenshot, input, record on Windows (also from WSL)
     - `video`: contact sheets and EDL showcase edits
     - `backup`: snapshot and restore saves
+    - `nexus`: Nexus Mods - find gameplay mods, check an installed setup (Mod Organizer 2) for updates,
+      download, install. Search and update checks need no account; `download` wants `NEXUS_API_KEY`
     - `publish`: pre-release lint
     - `kb`: the knowledge base
 - **fal MCP server:** `https://mcp.fal.ai/mcp` with header `Authorization: Bearer $FAL_KEY`.
