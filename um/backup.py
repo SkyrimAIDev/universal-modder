@@ -18,9 +18,9 @@ import hashlib
 import json
 import time
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
-from um.common import data_dir, die, to_posix
+from um.common import data_dir, die, safe_relpath, to_posix
 
 
 def _root(name: str) -> Path:
@@ -34,11 +34,10 @@ def _safe_dst(root: Path, rel: str) -> Path:
     zip's own manifest, and a snapshot can arrive from anywhere (handed over, downloaded, --snapshot FILE),
     so "../../x" or an absolute path would otherwise have restore write outside the folder being restored -
     pathlib drops root entirely when the right-hand side is absolute."""
-    name = str(rel)
-    parts = PurePosixPath(name).parts
-    if "\\" in name or name.startswith("/") or ".." in parts or (len(name) > 1 and name[1] == ":"):
+    p = safe_relpath(rel)
+    if p is None:
         die(f"unsafe path in the snapshot's manifest: {rel!r} - this snapshot is not one we wrote")
-    dst = root / PurePosixPath(name)
+    dst = root / p
     try:
         dst.resolve().relative_to(root.resolve())     # also catches a symlink inside root pointing out of it
     except ValueError:

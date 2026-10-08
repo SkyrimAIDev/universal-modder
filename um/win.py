@@ -31,9 +31,9 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
-from um.common import die, is_windows, is_wsl, ps_exe, ps_quote, to_posix, to_win
+from um.common import die, is_windows, is_wsl, ps_exe, ps_quote, safe_relpath, to_posix, to_win
 
 HERE = Path(__file__).resolve().parent
 TOOLS = HERE / "ps1"          # shipped inside the package so `uv tool install` gets them too
@@ -137,12 +137,11 @@ def _extract_zip(z: Path, dest: Path) -> str:
     with zipfile.ZipFile(z) as zf:
         roots = set()
         for info in zf.infolist():
-            name = info.filename.replace("\\", "/")
-            parts = PurePosixPath(name).parts
-            if name.startswith("/") or ".." in parts or (len(name) > 1 and name[1] == ":"):
+            rel = safe_relpath(info.filename, allow_backslash=True)
+            if rel is None:
                 die(f"{z.name} names a path that would escape {dest}: {info.filename!r} - not extracting it")
-            if parts:
-                roots.add(parts[0])
+            if rel.parts:
+                roots.add(rel.parts[0])
         if len(roots) != 1:
             die(f"expected one top-level folder in {z.name}, found {sorted(roots) or 'nothing'}")
         zf.extractall(dest)
