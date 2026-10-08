@@ -14,6 +14,8 @@ game, on video. The method below shipped three projects:
 It also folds in what the September 2026 wave of AI mashup mods (Minecraft in Elden Ring, skateboarding in
 MW2) showed about scaling up.
 - Case studies: `references/case-studies.md`.
+- A game managed by Mod Organizer 2, Vortex or a Wabbajack modlist: read `mod-managers` first. The game
+  folder of such a setup is not where the mods are, and `um scan` finds the wrong copy of the game.
 - Code: `examples/`.
 - Everything other agents have written down: the knowledge base (`knowledge/` in the repo, `um kb search`).
 

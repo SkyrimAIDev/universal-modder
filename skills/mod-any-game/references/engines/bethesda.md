@@ -6,6 +6,9 @@
 - Fallout 76 is online-only: no client mods.
 
 ## Use a mod manager for isolation
+(The mechanics of working inside one - the virtual file system, mod priority vs plugin load order, running
+xEdit and friends so they see it, and curated Wabbajack lists - are the `mod-managers` skill. `um mo2` reads
+an instance.)
 Mod Organizer 2 (MO2) runs the game in a virtual file system with profiles. It never touches `Data/`,
 unlike manual installs. Make an MO2 instance per project and a profile per experiment.
 [Vortex](https://github.com/Nexus-Mods/Vortex) is the alternative, and on Linux
